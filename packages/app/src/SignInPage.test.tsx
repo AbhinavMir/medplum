@@ -92,6 +92,14 @@ describe('SignInPage', () => {
     });
   });
 
+  test('Register hidden when already signed in', async () => {
+    getConfig().registerEnabled = true;
+    setup('/signin?project=new', new MockClient({ profile: DrAliceSmith }));
+
+    expect(screen.getByText('Sign in again to create a new project')).toBeInTheDocument();
+    expect(screen.queryByText('Register')).not.toBeInTheDocument();
+  });
+
   test('Register disabled', async () => {
     getConfig().registerEnabled = false;
     setup();
