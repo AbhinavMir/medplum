@@ -202,6 +202,7 @@ export function PasswordForm(props: PasswordFormProps): JSX.Element {
           autoFocus={true}
           error={getErrorsForInput(outcome, 'password')}
           data-testid="auth.password"
+          visibilityToggleButtonProps={{ tabIndex: 0, 'aria-label': 'Toggle password visibility' }}
         />
       </Stack>
       <Stack gap="xs">

@@ -60,4 +60,20 @@ describe('AuthenticationForm', () => {
 
     expect(screen.getByTestId('auth.email')).toBeInTheDocument();
   });
+  test('Password visibility toggle is keyboard accessible', async () => {
+    render(
+      <MedplumProvider medplum={new MockClient()}>
+        <AuthenticationForm handleAuthResponse={() => {}} />
+      </MedplumProvider>
+    );
+
+    const input = screen.getByTestId('auth.email');
+    await act(async () => fireEvent.change(input, { target: { value: 'me@example.com' } }));
+
+    const button = screen.getByRole('button', { name: 'Continue' });
+    await act(async () => fireEvent.click(button));
+
+    const toggle = screen.getByRole('button', { name: 'Toggle password visibility' });
+    expect(toggle).toHaveAttribute('tabindex', '0');
+  });
 });

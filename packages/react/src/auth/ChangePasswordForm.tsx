@@ -47,18 +47,21 @@ export function ChangePasswordForm(props: ChangePasswordFormProps): JSX.Element 
               required={true}
               autoFocus={true}
               error={getErrorsForInput(outcome, 'oldPassword')}
+              visibilityToggleButtonProps={{ tabIndex: 0, 'aria-label': 'Toggle password visibility' }}
             />
             <PasswordInput
               name="newPassword"
               label="New password"
               required={true}
               error={getErrorsForInput(outcome, 'newPassword')}
+              visibilityToggleButtonProps={{ tabIndex: 0, 'aria-label': 'Toggle password visibility' }}
             />
             <PasswordInput
               name="confirmPassword"
               label="Confirm new password"
               required={true}
               error={getErrorsForInput(outcome, 'confirmPassword')}
+              visibilityToggleButtonProps={{ tabIndex: 0, 'aria-label': 'Toggle password visibility' }}
             />
             <Group justify="flex-end" mt="xl" wrap="nowrap">
               <Button type="submit">Change password</Button>

@@ -124,6 +124,7 @@ export function NewUserForm(props: NewUserFormProps): JSX.Element {
           autoComplete="off"
           required={true}
           error={getErrorsForInput(outcome, 'password')}
+          visibilityToggleButtonProps={{ tabIndex: 0, 'aria-label': 'Toggle password visibility' }}
         />
       </Stack>
       <Stack gap="xs">
