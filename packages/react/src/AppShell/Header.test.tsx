@@ -46,6 +46,28 @@ describe('Header', () => {
     expect(screen.getByText('Alice Smith')).toBeInTheDocument();
   });
 
+  test('Renders active project name', async () => {
+    const client = new MockClient();
+    client.setActiveLoginOverride({
+      accessToken: 'abc',
+      refreshToken: 'xyz',
+      profile: { reference: 'Practitioner/123', display: 'Alice Smith' },
+      project: { reference: 'Project/456', display: 'My Project' },
+    });
+    await act(async () => {
+      render(
+        <MemoryRouter initialEntries={['/']} initialIndex={0}>
+          <MedplumProvider medplum={client} navigate={navigateMock}>
+            <MantineAppShell>
+              <Header logo={<Logo size={24} />} version="test.version" navbarToggle={closeMock} />
+            </MantineAppShell>
+          </MedplumProvider>
+        </MemoryRouter>
+      );
+    });
+    expect(screen.getByText('My Project')).toBeInTheDocument();
+  });
+
   test('Open and close the user menu', async () => {
     await setup();
 
