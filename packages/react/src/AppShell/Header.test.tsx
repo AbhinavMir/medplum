@@ -141,7 +141,8 @@ describe('Header', () => {
       fireEvent.click(screen.getByText('Alice Smith'));
     });
 
-    expect(await screen.findByText('My Project')).toBeInTheDocument();
+    // "My Project" appears in both the header button and the dropdown
+    expect(await screen.findAllByText('My Project')).not.toHaveLength(0);
     expect(await screen.findByText('My Other Project')).toBeInTheDocument();
 
     // Click on other project to switch
