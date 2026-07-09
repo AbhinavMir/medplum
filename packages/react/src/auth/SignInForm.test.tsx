@@ -506,7 +506,9 @@ describe('SignInForm', () => {
     });
 
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Password', { exact: false, selector: 'input' }), { target: { value: 'newproject' } });
+      fireEvent.change(screen.getByLabelText('Password', { exact: false, selector: 'input' }), {
+        target: { value: 'newproject' },
+      });
     });
 
     await act(async () => {
