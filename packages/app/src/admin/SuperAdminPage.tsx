@@ -230,7 +230,12 @@ export function SuperAdminPage(): JSX.Element {
       <Form onSubmit={forceSetPassword}>
         <Stack>
           <TextInput name="email" label="Email" required />
-          <PasswordInput name="password" label="Password" required />
+          <PasswordInput
+            name="password"
+            label="Password"
+            required
+            visibilityToggleButtonProps={{ tabIndex: 0, 'aria-label': 'Toggle password visibility' }}
+          />
           <TextInput name="projectId" label="Project ID" />
           <Button type="submit">Force Set Password</Button>
         </Stack>

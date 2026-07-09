@@ -56,12 +56,14 @@ export function SetPasswordForm(props: SetPasswordFormProps): JSX.Element {
               label="New password"
               required={true}
               error={getErrorsForInput(outcome, 'password')}
+              visibilityToggleButtonProps={{ tabIndex: 0, 'aria-label': 'Toggle password visibility' }}
             />
             <PasswordInput
               name="confirmPassword"
               label="Confirm new password"
               required={true}
               error={getErrorsForInput(outcome, 'confirmPassword')}
+              visibilityToggleButtonProps={{ tabIndex: 0, 'aria-label': 'Toggle password visibility' }}
             />
             <Group justify="flex-end" mt="xl">
               <Button type="submit">Set password</Button>

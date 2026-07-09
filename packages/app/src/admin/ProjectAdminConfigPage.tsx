@@ -34,7 +34,12 @@ export function ProjectAdminConfigPage(): JSX.Element {
       <Form onSubmit={forceSetPassword}>
         <Stack>
           <TextInput name="email" label="Email" required />
-          <PasswordInput name="password" label="Password" required />
+          <PasswordInput
+            name="password"
+            label="Password"
+            required
+            visibilityToggleButtonProps={{ tabIndex: 0, 'aria-label': 'Toggle password visibility' }}
+          />
           <Button type="submit">Force Set Password</Button>
         </Stack>
       </Form>
