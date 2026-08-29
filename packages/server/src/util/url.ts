@@ -1,10 +1,138 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
+import { concatUrls } from '@medplum/core';
 import ipaddr from 'ipaddr.js';
+import dns from 'node:dns';
+import type { Dispatcher } from 'undici';
+import { Agent, buildConnector } from 'undici';
+import { getConfig } from '../config/loader';
+import type { MedplumServerConfig } from '../config/types';
 
 export interface OutboundUrlValidationOptions {
   readonly allowHttp?: boolean;
   readonly allowUnsafeHostname?: boolean;
+}
+
+const connector = buildConnector({});
+
+// The DOM RequestInit type used by built-in fetch does not include Undici's
+// dispatcher option, even though Node's fetch accepts it.
+type FetchInitWithDispatcher = RequestInit & { dispatcher?: Dispatcher };
+
+/**
+ * Returns the project ID from a project-scoped API path.
+ * @param url - Request URL, optionally including a query string.
+ * @returns The project ID, or undefined if the URL is not project scoped.
+ */
+export function getProjectIdFromUrl(url: string): string | undefined {
+  const segments = url.split('?', 1)[0].split('/');
+  const index = segments[1] === 'api' ? 2 : 1;
+  return segments[index] === 'projects' ? segments[index + 1] : undefined;
+}
+
+/**
+ * Removes the optional `/api` and `/projects/{projectId}` mount prefixes from a request URL.
+ * @param url - Request URL, optionally including a query string.
+ * @returns The normalized request path.
+ */
+export function getNormalizedPath(url: string): string {
+  const path = url.split('?', 1)[0];
+  const segments = path.split('/');
+  let index = 1;
+
+  if (segments[index] === 'api') {
+    index++;
+  }
+  if (segments[index] === 'projects' && segments[index + 1]) {
+    index += 2;
+  }
+
+  return '/' + segments.slice(index).join('/');
+}
+
+/**
+ * Adds the request's project scope to an internal server URL.
+ * @param requestUrl - The incoming request URL.
+ * @param baseUrl - The configured base URL for the target URL.
+ * @param targetUrl - The URL to scope. Defaults to the base URL.
+ * @returns The target URL with the request's project scope, if present.
+ */
+export function getProjectScopedUrl(requestUrl: string, baseUrl: string, targetUrl = baseUrl): string {
+  const projectId = getProjectIdFromUrl(requestUrl);
+  if (!projectId || !targetUrl.startsWith(baseUrl)) {
+    return targetUrl;
+  }
+
+  const projectBaseUrl = concatUrls(baseUrl, `projects/${projectId}/`);
+  return concatUrls(projectBaseUrl, targetUrl.substring(baseUrl.length));
+}
+
+export function createSafeConnect(connect: buildConnector.connector = connector): buildConnector.connector {
+  return (options, callback) => {
+    if (options.protocol !== 'https:') {
+      callback(new Error('Outbound request blocked: HTTPS is required'), null);
+      return;
+    }
+
+    if (isUnsafeHostname(options.hostname)) {
+      callback(new Error(`Outbound request to unsafe hostname ${options.hostname} is blocked`), null);
+      return;
+    }
+
+    dns.lookup(options.hostname, { all: true }, (err, addresses) => {
+      if (err) {
+        callback(err, null);
+        return;
+      }
+
+      if (addresses.some(({ address }) => isUnsafeIpAddress(address))) {
+        callback(new Error(`Outbound request to unsafe address ${options.hostname} is blocked`), null);
+        return;
+      }
+
+      const [{ address }] = addresses;
+      connect({ ...options, hostname: address, servername: options.hostname }, callback);
+    });
+  };
+}
+
+export const safeAgent = new Agent({
+  connect: createSafeConnect(),
+});
+
+/**
+ * Performs an outbound fetch with SSRF-safe connection handling unless unsafe outbound requests are explicitly allowed.
+ * @param input - Fetch input.
+ * @param init - Fetch options.
+ * @returns Fetch response.
+ */
+export function safeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  if (getConfig().allowUnsafeOutbound) {
+    return fetch(input, init);
+  }
+  return fetch(input, { ...init, dispatcher: safeAgent } as FetchInitWithDispatcher);
+}
+
+/**
+ * Performs static outbound URL checks before enqueueing async jobs.
+ * This prevents known-bad jobs from consuming retry attempts while leaving DNS and redirect safety to safeAgent.
+ * @param value - URL string.
+ * @param config - Server configuration.
+ * @returns True if the URL should be queued for outbound fetch.
+ */
+export function isAllowedOutboundUrlForQueue(
+  value: string,
+  config: Pick<MedplumServerConfig, 'allowUnsafeOutbound'>
+): boolean {
+  try {
+    validateOutboundUrl(value, {
+      allowHttp: config.allowUnsafeOutbound,
+      allowUnsafeHostname: config.allowUnsafeOutbound,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

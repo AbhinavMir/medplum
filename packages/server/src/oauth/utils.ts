@@ -56,7 +56,7 @@ import {
   LoginEvent,
   UserAuthenticationEvent,
 } from '../util/auditevent';
-import { validateOutboundUrl } from '../util/url';
+import { getProjectScopedUrl, safeFetch } from '../util/url';
 import { getStandardClientById } from './clients';
 import type { MedplumAccessTokenClaims } from './keys';
 import { generateAccessToken, generateIdToken, generateRefreshToken, generateSecret, verifyJwt } from './keys';
@@ -608,6 +608,7 @@ export async function getAuthTokens(
   options?: {
     accessLifetime?: string;
     refreshLifetime?: string;
+    issuer?: string;
   }
 ): Promise<TokenResult> {
   assert.equal(getReferenceString(user), login.user?.reference);
@@ -626,16 +627,19 @@ export async function getAuthTokens(
     });
   }
 
-  const idToken = await generateIdToken({
-    client_id: clientId,
-    login_id: login.id,
-    fhirUser: profile.reference,
-    email: login.scope?.includes('email') && user.resourceType === 'User' ? user.email : undefined,
-    aud: clientId,
-    sub: user.id,
-    nonce: login.nonce as string,
-    auth_time: (getDateProperty(login.authTime) as Date).getTime() / 1000,
-  });
+  const idToken = await generateIdToken(
+    {
+      client_id: clientId,
+      login_id: login.id,
+      fhirUser: profile.reference,
+      email: login.scope?.includes('email') && user.resourceType === 'User' ? user.email : undefined,
+      aud: clientId,
+      sub: user.id,
+      nonce: login.nonce as string,
+      auth_time: (getDateProperty(login.authTime) as Date).getTime() / 1000,
+    },
+    options?.issuer
+  );
 
   const accessToken = await generateAccessToken(
     {
@@ -647,7 +651,7 @@ export async function getAuthTokens(
       profile: profile.reference as string,
       email: login.scope?.includes('email') && user.resourceType === 'User' ? user.email : undefined,
     },
-    { lifetime: options?.accessLifetime }
+    { lifetime: options?.accessLifetime, issuer: options?.issuer }
   );
 
   const refreshToken = login.refreshSecret
@@ -657,7 +661,8 @@ export async function getAuthTokens(
           login_id: login.id,
           refresh_secret: login.refreshSecret,
         },
-        options?.refreshLifetime
+        options?.refreshLifetime,
+        options?.issuer
       )
     : undefined;
 
@@ -845,14 +850,6 @@ function includeRefreshToken(request: LoginRequest, client: ClientApplication | 
   return !!(client?.grantType?.includes('refresh_token') || scopeArray?.includes('offline_access'));
 }
 
-export function normalizeUserInfoUrl(userInfoUrl: string): string {
-  const allowInsecureExternalAuthUrl = !!getConfig().allowInsecureExternalAuthUrl;
-  return validateOutboundUrl(userInfoUrl, {
-    allowHttp: allowInsecureExternalAuthUrl,
-    allowUnsafeHostname: allowInsecureExternalAuthUrl,
-  }).toString();
-}
-
 /**
  * Returns the external identity provider user info for an access token.
  * This can be used to verify the access token and get the user's email address.
@@ -868,18 +865,11 @@ export async function getExternalUserInfo(
 ): Promise<JWTPayload> {
   const log = getLogger();
 
-  try {
-    userInfoUrl = normalizeUserInfoUrl(userInfoUrl);
-  } catch (err: unknown) {
-    log.warn('Invalid user info URL', { userInfoUrl, clientId: idp?.clientId, err });
-    throw new OperationOutcomeError(badRequest('Invalid user info URL - check your identity provider configuration'));
-  }
-
   const request = buildExternalUserInfoRequest(userInfoUrl, externalAccessToken, idp);
 
   let response;
   try {
-    response = await fetch(request.url, request.init);
+    response = await safeFetch(request.url, request.init);
   } catch (err: any) {
     log.warn('Error while verifying external auth code', err);
     throw new OperationOutcomeError(badRequest('Failed to verify code - check your identity provider configuration'));
@@ -1023,12 +1013,23 @@ export async function getLoginForAccessToken(
 
   let verifyResult: Awaited<ReturnType<typeof verifyJwt>>;
   try {
-    verifyResult = await verifyJwt(accessToken);
+    const config = getConfig();
+    const expectedIssuer = req ? getProjectScopedUrl(req.originalUrl, config.issuer) : config.issuer;
+    verifyResult = await verifyJwt(accessToken, expectedIssuer);
   } catch {
     return undefined;
   }
 
   const claims = verifyResult.payload as MedplumAccessTokenClaims;
+
+  // A valid signature only proves that this server minted the token, not that it minted an access token.
+  // ID tokens are audienced to the client rather than to the issuer, and refresh tokens carry a refresh secret.
+  // Without these checks, either one is accepted as an access token. See RFC 8725 sections 3.9 and 3.12.
+  const config = getConfig();
+  const expectedAudience = req ? getProjectScopedUrl(req.originalUrl, config.issuer) : config.issuer;
+  if (claims.aud !== expectedAudience || claims.refresh_secret !== undefined) {
+    return undefined;
+  }
 
   let login = undefined;
   try {
@@ -1057,10 +1058,7 @@ export async function getLoginForAccessToken(
  * @param token - The basic auth token as provided by the client.
  * @returns On success, returns the login, membership, and project. On failure, throws an error.
  */
-export async function getLoginForBasicAuth(
-  req: IncomingMessage,
-  token: string
-): Promise<AuthenticationResult | undefined> {
+export async function getLoginForBasicAuth(req: Request, token: string): Promise<AuthenticationResult | undefined> {
   const credentials = Buffer.from(token, 'base64').toString('ascii');
   const [username, password] = credentials.split(':');
   if (!username || !password) {
@@ -1079,6 +1077,10 @@ export async function getLoginForBasicAuth(
     return undefined;
   }
 
+  if (client.status && client.status !== 'active') {
+    return undefined;
+  }
+
   const membership = await getClientApplicationMembership(systemRepo, client);
   if (!membership || membership.active === false) {
     return undefined;
@@ -1090,7 +1092,18 @@ export async function getLoginForBasicAuth(
     user: createReference(client),
     authMethod: 'client',
     authTime: new Date().toISOString(),
+    remoteAddress: req.ip,
   };
+
+  // Basic auth has no login step, so the checks that the token endpoint performs once
+  // when issuing a token must be performed here on every request instead.
+  const userConfig = await getUserConfiguration(systemRepo, project, membership);
+  const accessPolicy = await getAccessPolicyForLogin({ login, project, membership, userConfig });
+  try {
+    await checkIpAccessRules(login, accessPolicy);
+  } catch {
+    return undefined;
+  }
 
   return makeAuthResult(systemRepo, req, login, project, membership, { profile: client });
 }

@@ -27,7 +27,7 @@ import type {
 } from '@medplum/fhirtypes';
 import type { Request, RequestHandler, Response } from 'express';
 import type { JWTVerifyOptions } from 'jose';
-import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { createRemoteJWKSet, customFetch, jwtVerify } from 'jose';
 import { createHash, randomUUID } from 'node:crypto';
 import { getUserConfiguration } from '../auth/me';
 import { getProjectIdByClientId } from '../auth/utils';
@@ -35,6 +35,7 @@ import { getConfig } from '../config/loader';
 import { getAccessPolicyForLogin } from '../fhir/accesspolicy';
 import { getGlobalSystemRepo } from '../fhir/repo';
 import { getTopicForUser } from '../fhircast/utils';
+import { getProjectScopedUrl, safeFetch } from '../util/url';
 import { validateClientCert } from './cert';
 import type { MedplumRefreshTokenClaims } from './keys';
 import { generateSecret, verifyJwt } from './keys';
@@ -173,7 +174,7 @@ async function handleClientCredentials(req: Request, res: Response): Promise<voi
     return;
   }
 
-  await sendTokenResponse(res, login, client);
+  await sendTokenResponse(req, res, login, client);
 }
 
 /**
@@ -269,7 +270,7 @@ async function handleAuthorizationCode(req: Request, res: Response): Promise<voi
     }
   }
 
-  await sendTokenResponse(res, login, client);
+  await sendTokenResponse(req, res, login, client);
 }
 
 /**
@@ -287,7 +288,8 @@ async function handleRefreshToken(req: Request, res: Response): Promise<void> {
 
   let claims: MedplumRefreshTokenClaims;
   try {
-    claims = (await verifyJwt(refreshToken)).payload as MedplumRefreshTokenClaims;
+    claims = (await verifyJwt(refreshToken, getProjectScopedUrl(req.originalUrl, getConfig().issuer)))
+      .payload as MedplumRefreshTokenClaims;
   } catch {
     sendTokenError(res, 'invalid_request', 'Invalid refresh token');
     return;
@@ -322,6 +324,17 @@ async function handleRefreshToken(req: Request, res: Response): Promise<void> {
     return;
   }
 
+  let client: ClientApplication | undefined;
+  if (login.client) {
+    const clientId = resolveId(login.client) ?? '';
+    try {
+      client = await systemRepo.readResource<ClientApplication>('ClientApplication', clientId);
+    } catch {
+      sendTokenError(res, 'invalid_request', 'Invalid client');
+      return;
+    }
+  }
+
   const authHeader = req.headers.authorization;
   if (authHeader) {
     if (!authHeader.startsWith('Basic ')) {
@@ -339,15 +352,7 @@ async function handleRefreshToken(req: Request, res: Response): Promise<void> {
       sendTokenError(res, 'invalid_grant', 'Incorrect client secret');
       return;
     }
-  }
-
-  let client: ClientApplication | undefined;
-  if (login.client) {
-    const clientId = resolveId(login.client) ?? '';
-    try {
-      client = await systemRepo.readResource<ClientApplication>('ClientApplication', clientId);
-    } catch {
-      sendTokenError(res, 'invalid_request', 'Invalid client');
+    if (!(await validateClientIdAndSecret(res, client, clientSecret))) {
       return;
     }
   }
@@ -359,7 +364,7 @@ async function handleRefreshToken(req: Request, res: Response): Promise<void> {
     userAgent: req.get('User-Agent'),
   });
 
-  await sendTokenResponse(res, updatedLogin, client);
+  await sendTokenResponse(req, res, updatedLogin, client);
 }
 
 /**
@@ -497,7 +502,7 @@ export async function exchangeExternalAuthToken(
     membershipId,
   });
 
-  await sendTokenResponse(res, login, client);
+  await sendTokenResponse(req, res, login, client);
 }
 
 function validateExternalAuthTokenExchangeRequest(
@@ -667,7 +672,7 @@ async function handlePreAuthorizedCode(req: Request, res: Response): Promise<voi
     return;
   }
 
-  await sendTokenResponse(res, login, client);
+  await sendTokenResponse(req, res, login, client);
 }
 
 /**
@@ -684,7 +689,7 @@ async function handlePreAuthorizedCode(req: Request, res: Response): Promise<voi
  */
 async function getClientIdAndSecret(req: Request): Promise<ClientIdAndSecret> {
   if (req.body.client_assertion_type) {
-    return parseClientAssertion(req.body.client_assertion_type, req.body.client_assertion);
+    return parseClientAssertion(req, req.body.client_assertion_type, req.body.client_assertion);
   }
 
   const authHeader = req.headers.authorization;
@@ -721,11 +726,13 @@ async function getClientIdAndSecret(req: Request): Promise<ClientIdAndSecret> {
  * 2. https://www.hl7.org/fhir/smart-app-launch/example-backend-services.html#step-2-discovery
  * 3. https://docs.oracle.com/en/cloud/get-started/subscriptions-cloud/csimg/obtaining-access-token-using-self-signed-client-assertion.html
  * 4. https://darutk.medium.com/oauth-2-0-client-authentication-4b5f929305d4
+ * @param req - The HTTP request.
  * @param clientAssertionType - The client assertion type.
  * @param clientAssertion - The client assertion JWT.
  * @returns The parsed client ID and secret on success, or an error message on failure.
  */
 async function parseClientAssertion(
+  req: Request,
   clientAssertionType: OAuthClientAssertionType,
   clientAssertion: string
 ): Promise<ClientIdAndSecret> {
@@ -737,7 +744,8 @@ async function parseClientAssertion(
     return { error: 'Invalid client assertion' };
   }
 
-  const { tokenUrl } = getConfig();
+  const config = getConfig();
+  const tokenUrl = getProjectScopedUrl(req.originalUrl, config.baseUrl, config.tokenUrl);
   const claims = parseJWTPayload(clientAssertion);
 
   if (claims.aud !== tokenUrl) {
@@ -761,7 +769,7 @@ async function parseClientAssertion(
     return { error: 'Client must have a JWK Set URL' };
   }
 
-  const JWKS = createRemoteJWKSet(new URL(client.jwksUri));
+  const JWKS = createRemoteJWKSet(new URL(client.jwksUri), { [customFetch]: safeFetch });
 
   const verifyOptions: JWTVerifyOptions = {
     issuer: clientId,
@@ -878,11 +886,17 @@ async function validateClientIdAndSecret(
 
 /**
  * Sends a successful token response.
+ * @param req - The HTTP request.
  * @param res - The HTTP response.
  * @param login - The user login.
  * @param client - The client application. Optional.
  */
-async function sendTokenResponse(res: Response, login: WithId<Login>, client?: ClientApplication): Promise<void> {
+async function sendTokenResponse(
+  req: Request,
+  res: Response,
+  login: WithId<Login>,
+  client?: ClientApplication
+): Promise<void> {
   const config = getConfig();
 
   const systemRepo = getGlobalSystemRepo();
@@ -894,6 +908,7 @@ async function sendTokenResponse(res: Response, login: WithId<Login>, client?: C
   const tokens = await getAuthTokens(user, login, membership.profile as Reference<ProfileResource>, {
     accessLifetime: client?.accessTokenLifetime,
     refreshLifetime: client?.refreshTokenLifetime,
+    issuer: getProjectScopedUrl(req.originalUrl, config.issuer),
   });
   let patient = undefined;
   let encounter = undefined;
